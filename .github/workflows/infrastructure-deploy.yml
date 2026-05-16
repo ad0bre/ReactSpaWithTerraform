@@ -1,0 +1,393 @@
+# ============================================================================
+# Infrastructure Deployment Pipeline
+#
+# Triggered on every push to main (i.e. after a PR merge). Runs in stages:
+#   1. fmt + validate     — always, no approval
+#   2. staging-plan       — approval-gated, produces a saved plan artifact
+#   3. staging-apply      — approval-gated, applies the saved plan
+#   4. prod-plan          — approval-gated, only after staging applied
+#   5. prod-apply         — approval-gated, applies the saved plan
+#
+# Authentication: OIDC federated credentials to Azure. No client secret.
+# Configure one federated credential per environment name listed below.
+# See bootstrap/README.md for the az commands.
+#
+# Required repo VARIABLES (Settings → Secrets and variables → Actions):
+#   AZURE_CLIENT_ID         — service principal app ID
+#   AZURE_TENANT_ID         — Azure AD tenant
+#   AZURE_SUBSCRIPTION_ID   — target subscription
+#   TFSTATE_RESOURCE_GROUP  — typically "rg-tfstate"
+#   TFSTATE_STORAGE_ACCOUNT — the bootstrapped state storage account name
+#   TFSTATE_CONTAINER       — typically "tfstate"
+#
+# Required GitHub Environments (Settings → Environments):
+#   staging-plan, staging-apply, prod-plan, prod-apply
+#   Each with required reviewers.
+# ============================================================================
+
+name: Infrastructure Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/infrastructure-deploy.yml'
+  # Manual trigger for re-runs after a failed apply, or for ad-hoc deploys
+  workflow_dispatch:
+
+# Concurrency: serialize infra runs against main. Don't cancel an in-progress
+# apply — that could leave Terraform state locked.
+concurrency:
+  group: infra-deploy-main
+  cancel-in-progress: false
+
+# Default minimal permissions; jobs that need more elevate explicitly.
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.7.5"
+  # Use Azure CLI auth method for the azurerm provider when ARM_USE_OIDC=true
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  # ==========================================================================
+  # Job 1: format check + validation (both envs, parallel)
+  # No approval. Always runs.
+  # ==========================================================================
+  validate:
+    name: fmt + validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC to Azure (validate needs provider init)
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [staging, prod]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false # we parse our own outputs
+
+      # fmt check runs across the whole repo from the root, recursively.
+      # Doing it once would be enough, but pinning it to the matrix means
+      # both env jobs surface the failure clearly.
+      - name: terraform fmt (check)
+        run: terraform fmt -check -recursive
+        working-directory: .
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: terraform init (${{ matrix.env }})
+        working-directory: infra/envs/${{ matrix.env }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=${{ matrix.env }}.tfstate"
+
+      - name: terraform validate (${{ matrix.env }})
+        working-directory: infra/envs/${{ matrix.env }}
+        run: terraform validate
+
+  # ==========================================================================
+  # Job 2: staging plan — approval-gated
+  # Produces a saved plan file uploaded as an artifact for the apply job.
+  # ==========================================================================
+  staging-plan:
+    name: staging · plan
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: staging-plan # approval gate configured in repo settings
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: terraform init
+        working-directory: infra/envs/staging
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=staging.tfstate"
+
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes pending.
+      # We treat 2 as success; the apply job will run.
+      - name: terraform plan
+        id: plan
+        working-directory: infra/envs/staging
+        run: |
+          set +e
+          terraform plan \
+            -out=tfplan \
+            -detailed-exitcode \
+            -no-color \
+            -var-file=terraform.tfvars
+          ec=$?
+          echo "exitcode=$ec" >> "$GITHUB_OUTPUT"
+          if [ $ec -eq 1 ]; then
+            echo "::error::Plan failed"
+            exit 1
+          fi
+          exit 0
+
+      # Human-readable plan in the job summary for review
+      - name: Render plan to summary
+        working-directory: infra/envs/staging
+        run: |
+          {
+            echo "## Staging Plan"
+            echo '```hcl'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-staging-${{ github.run_id }}
+          path: |
+            infra/envs/staging/tfplan
+            infra/envs/staging/.terraform.lock.hcl
+          retention-days: 1 # plans contain everything Terraform would do; keep short
+
+  # ==========================================================================
+  # Job 3: staging apply — approval-gated, consumes the saved plan
+  # ==========================================================================
+  staging-apply:
+    name: staging · apply
+    needs: staging-plan
+    if: needs.staging-plan.outputs.plan_exitcode == '2'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging-apply
+      url: ${{ steps.outputs.outputs.app_url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: terraform init
+        working-directory: infra/envs/staging
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=staging.tfstate"
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-staging-${{ github.run_id }}
+          path: infra/envs/staging
+
+      - name: terraform apply (saved plan)
+        working-directory: infra/envs/staging
+        run: terraform apply -auto-approve -no-color tfplan
+
+      - name: Capture outputs
+        id: outputs
+        working-directory: infra/envs/staging
+        run: |
+          app_url=$(terraform output -raw app_url)
+          echo "app_url=$app_url" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Staging Apply Complete"
+            echo ""
+            echo "- App URL: $app_url"
+            echo "- Storage account: $(terraform output -raw storage_account_name)"
+            echo "- SIG name: $(terraform output -raw shared_image_gallery_name)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # Job 4: prod plan — approval-gated, only after staging applied
+  # ==========================================================================
+  prod-plan:
+    name: prod · plan
+    needs: staging-apply
+    runs-on: ubuntu-latest
+    environment:
+      name: prod-plan
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: terraform init
+        working-directory: infra/envs/prod
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=prod.tfstate"
+
+      - name: terraform plan
+        id: plan
+        working-directory: infra/envs/prod
+        run: |
+          set +e
+          terraform plan \
+            -out=tfplan \
+            -detailed-exitcode \
+            -no-color \
+            -var-file=terraform.tfvars
+          ec=$?
+          echo "exitcode=$ec" >> "$GITHUB_OUTPUT"
+          if [ $ec -eq 1 ]; then
+            echo "::error::Plan failed"
+            exit 1
+          fi
+          exit 0
+
+      - name: Render plan to summary
+        working-directory: infra/envs/prod
+        run: |
+          {
+            echo "## Prod Plan"
+            echo '```hcl'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-prod-${{ github.run_id }}
+          path: |
+            infra/envs/prod/tfplan
+            infra/envs/prod/.terraform.lock.hcl
+          retention-days: 1
+
+  # ==========================================================================
+  # Job 5: prod apply — approval-gated, consumes the saved plan
+  # ==========================================================================
+  prod-apply:
+    name: prod · apply
+    needs: prod-plan
+    if: needs.prod-plan.outputs.plan_exitcode == '2'
+    runs-on: ubuntu-latest
+    environment:
+      name: prod-apply
+      url: ${{ steps.outputs.outputs.app_url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: terraform init
+        working-directory: infra/envs/prod
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=prod.tfstate"
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-prod-${{ github.run_id }}
+          path: infra/envs/prod
+
+      - name: terraform apply (saved plan)
+        working-directory: infra/envs/prod
+        run: terraform apply -auto-approve -no-color tfplan
+
+      - name: Capture outputs
+        id: outputs
+        working-directory: infra/envs/prod
+        run: |
+          app_url=$(terraform output -raw app_url)
+          echo "app_url=$app_url" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Prod Apply Complete"
+            echo ""
+            echo "- App URL: $app_url"
+            echo "- Storage account: $(terraform output -raw storage_account_name)"
+            echo "- SIG name: $(terraform output -raw shared_image_gallery_name)"
+          } >> "$GITHUB_STEP_SUMMARY"
