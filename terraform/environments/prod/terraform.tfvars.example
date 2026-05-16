@@ -1,0 +1,30 @@
+project     = "helloapp"
+environment = "prod"
+location    = "westeurope"
+
+vnet_cidr           = "10.20.0.0/16"
+public_subnet_cidr  = "10.20.1.0/24"
+private_subnet_cidr = "10.20.2.0/24"
+
+storage_replication_type = "GRS"
+
+vm_size        = "Standard_B2s"
+instance_count = 2
+
+enable_autoscale  = true
+autoscale_min     = 2
+autoscale_max     = 6
+autoscale_default = 2
+
+admin_ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMOCKPRODKEYREPLACEMEXXXXXXXXXXXXXXXXXXXXXX prod@example.com"
+
+use_custom_image = false
+image_version    = "1.0.0" # Pin to specific version once Packer has published one
+
+tags = {
+  CostCenter    = "engineering-prod"
+  Owner         = "platform-team"
+  DataClass     = "public"
+  SLA           = "99.9"
+  BackupPolicy  = "daily"
+}

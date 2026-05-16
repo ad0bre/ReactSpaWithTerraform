@@ -1,0 +1,31 @@
+#cloud-config
+# Cloud-init for the seed (stock Ubuntu) bootstrap.
+# When use_custom_image is true, nginx is already baked in and this script
+# does nothing harmful — it just re-installs nginx (idempotent) and serves a
+# placeholder page so health probes succeed before Packer publishes an image.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - nginx
+
+write_files:
+  - path: /var/www/html/index.html
+    permissions: '0644'
+    owner: root:root
+    content: |
+      <!DOCTYPE html>
+      <html>
+      <head><title>Hello App — seed</title></head>
+      <body>
+        <h1>Seed instance</h1>
+        <p>This VM is running the stock Ubuntu seed image.</p>
+        <p>Run Packer and set use_custom_image = true to deploy the real app.</p>
+        <p>seed_mode = ${seed_mode}</p>
+      </body>
+      </html>
+
+runcmd:
+  - systemctl enable nginx
+  - systemctl restart nginx

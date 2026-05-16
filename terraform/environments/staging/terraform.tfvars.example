@@ -1,0 +1,23 @@
+project     = "helloapp"
+environment = "staging"
+location    = "westeurope"
+
+vnet_cidr           = "10.10.0.0/16"
+public_subnet_cidr  = "10.10.1.0/24"
+private_subnet_cidr = "10.10.2.0/24"
+
+storage_replication_type = "LRS"
+
+vm_size          = "Standard_B1s"
+instance_count   = 1
+enable_autoscale = false
+
+admin_ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMOCKKEYREPLACEMEXXXXXXXXXXXXXXXXXXXXXXXXXXXX staging@example.com"
+
+use_custom_image = false
+image_version    = "latest"
+
+tags = {
+  CostCenter = "engineering-staging"
+  Owner      = "platform-team"
+}

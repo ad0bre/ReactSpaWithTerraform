@@ -157,6 +157,8 @@ sketch
 ### Terraform ###
 # Local .terraform directories
 **/.terraform/*
+terraform/environments/prod/.terraform/
+terraform/environments/staging/.terraform/
 
 # .tfstate files
 *.tfstate
