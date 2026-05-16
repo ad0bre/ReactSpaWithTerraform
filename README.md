@@ -23,14 +23,14 @@ The project deliberately exercises three infrastructure pillars:
 ## Repository Layout
 
 ```
-hello-spa-terraform/
+ReactSpaWithTerraform/
 ├── app/                          # React SPA (Vite)
-├── infra/
+├── terraform/
 │   ├── modules/
 │   │   ├── network/              # VNet, subnets, NSGs
 │   │   ├── storage/              # Storage Account + Shared Image Gallery
 │   │   └── compute/              # VMSS, Load Balancer, autoscale
-│   └── envs/
+│   └── environments/
 │       ├── staging/              # wires modules with staging values
 │       └── prod/                 # wires modules with prod values
 ├── packer/                       # builds the nginx+React VM image
@@ -39,7 +39,7 @@ hello-spa-terraform/
 │   ├── scripts/                  # 01-install, 02-configure, 03-fetch-dist
 │   └── *.pkrvars.hcl.example
 └── .github/workflows/
-    ├── infra-deploy.yml          # main pipeline
+    ├── infrastructure-deploy.yml          # main pipeline
     └── SETUP.md                  # one-time GitHub configuration
 ```
 
@@ -82,8 +82,8 @@ hello-spa-terraform/
 ## 1. The Terraform Modules
 
 Each module is self-contained: `main.tf`, `variables.tf`, `outputs.tf`. They
-live in `infra/modules/` and are called by the environment configurations in
-`infra/envs/`.
+live in `terraform/modules/` and are called by the environment configurations in
+`terraform/environments/`.
 
 ### `network` module
 
@@ -198,7 +198,7 @@ for cross-module wiring.
 
 ## 2. The Environments
 
-Both environments live in `infra/envs/`, each with the same four files:
+Both environments live in `terraform/environments/`, each with the same four files:
 `main.tf`, `variables.tf`, `outputs.tf`, `terraform.tfvars.example`. Same
 modules, same wiring, different values.
 
@@ -232,7 +232,7 @@ Each environment ships a `terraform.tfvars.example` with placeholder values.
 Copy to `terraform.tfvars` and fill in real values:
 
 ```bash
-cd infra/envs/staging
+cd terraform/environments/staging
 cp terraform.tfvars.example terraform.tfvars
 # edit terraform.tfvars — at minimum, paste a real SSH public key
 ```
@@ -259,7 +259,7 @@ The GitHub Actions pipeline does this automatically using repo variables.
 ## 3. Packer
 
 Packer builds the custom VM image that the VMSS uses. It's a one-shot build
-tool, not infrastructure — it lives in `packer/`, not `infra/`.
+tool, not infrastructure — it lives in `packer/`, not `terraform/`.
 
 ### What Packer Does
 
@@ -327,8 +327,8 @@ See `packer/README.md` for the full local-run workflow.
 
 ## 4. The Pipeline
 
-A single workflow file (`.github/workflows/infra-deploy.yml`) drives all
-infrastructure deployment. Triggered on push to `main` when `infra/**`
+A single workflow file (`.github/workflows/infrastructure-deploy.yml`) drives all
+infrastructure deployment. Triggered on push to `main` when `terraform/**`
 changes, plus manual `workflow_dispatch`.
 
 ### Workflow Structure
@@ -435,7 +435,7 @@ Each is one `az ad app federated-credential create` call. The full loop is in
 
 ### Concurrency
 
-The workflow uses `concurrency: group: infra-deploy-main, cancel-in-progress: false`.
+The workflow uses `concurrency: group: infrastructure-deploy-main, cancel-in-progress: false`.
 Two merges to main can't run the pipeline in parallel against the same state,
 and an in-progress apply is never cancelled (which could leave Terraform's
 state locked).
@@ -591,7 +591,7 @@ For each:
 ssh-keygen -t ed25519 -C "helloapp-staging" -f ~/.ssh/helloapp_staging -N ""
 
 # Copy the example and edit
-cd infra/envs/staging
+cd terraform/environments/staging
 cp terraform.tfvars.example terraform.tfvars
 ```
 
@@ -616,7 +616,7 @@ and we'll commit it intentionally for the pipeline's benefit).
 Before letting CI drive, verify everything works locally:
 
 ```bash
-cd infra/envs/staging
+cd terraform/environments/staging
 
 terraform init \
   -backend-config="resource_group_name=rg-tfstate" \
@@ -641,7 +641,7 @@ npm ci
 npm run build
 
 # Upload dist/ to the staging storage account
-SA_STAGING=$(cd ../infra/envs/staging && terraform output -raw storage_account_name)
+SA_STAGING=$(cd ../terraform/environments/staging && terraform output -raw storage_account_name)
 az storage blob upload-batch \
   --account-name "$SA_STAGING" \
   --destination 'artifacts/latest' \
@@ -680,7 +680,7 @@ and publish `nginx-react:1.0.0` to the staging SIG. Takes ~5–10 minutes.
 
 ### Step 10 — Re-apply Terraform with the Custom Image
 
-Edit `infra/envs/staging/terraform.auto.tfvars`:
+Edit `terraform/environments/staging/terraform.auto.tfvars`:
 
 ```hcl
 use_custom_image = true
@@ -690,7 +690,7 @@ image_version    = "1.0.0"
 Then:
 
 ```bash
-cd ../infra/envs/staging
+cd ../terraform/environments/staging
 terraform apply
 ```
 
@@ -702,12 +702,12 @@ should now see your React app.
 Commit and push:
 
 ```bash
-git add infra/envs/staging/terraform.auto.tfvars infra/envs/prod/terraform.auto.tfvars
+git add terraform/environments/staging/terraform.auto.tfvars terraform/environments/prod/terraform.auto.tfvars
 git commit -m "Configure environments for first deploy"
 git push origin main
 ```
 
-The `infra-deploy.yml` workflow runs:
+The `infrastructure-deploy.yml` workflow runs:
 
 1. `validate` runs automatically (~1 min).
 2. Go to Actions → the running workflow → click **Review deployments** to
@@ -741,7 +741,7 @@ prod tfvars file pins to a specific version rather than `"latest"`.
 ### Tearing down an environment
 
 ```bash
-cd infra/envs/staging
+cd terraform/environments/staging
 terraform destroy
 ```
 
