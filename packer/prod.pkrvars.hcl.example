@@ -1,0 +1,29 @@
+# ============================================================================
+# Packer vars — PRODUCTION
+#
+# DIFFERENCES FROM STAGING:
+#   target_resource_group_name   rg-helloapp-staging  →  rg-helloapp-prod
+#   shared_image_gallery_name    sig_helloapp_staging →  sig_helloapp_prod
+#   replication_regions          [germanywestcentral]         →  [germanywestcentral, northeurope]
+#   image_version                bumped per release    (semver discipline)
+# ============================================================================
+
+subscription_id            = "00000000-0000-0000-0000-000000000000"
+location                   = "germanywestcentral"
+
+build_resource_group_name  = "rg-packer-builds"
+
+# Prod env's RG and SIG
+target_resource_group_name = "rg-helloapp-prod"
+shared_image_gallery_name  = "sig_helloapp_prod"
+shared_image_name          = "nginx-react"
+storage_account_name       = "sthelloappprodxxxxxx"
+
+artifacts_container_name   = "artifacts"
+artifacts_blob_prefix      = "release/" # released builds, not 'latest'
+image_version              = "1.0.0"     # bump per release
+
+# Multi-region replication for prod — durability + future regional failover
+replication_regions        = ["germanywestcentral", "northeurope"]
+
+vm_size                    = "Standard_B2s"

@@ -1,0 +1,38 @@
+# ============================================================================
+# Packer vars — STAGING
+#
+# Copy to staging.pkrvars.hcl and fill in real values:
+#   cp staging.pkrvars.hcl.example staging.pkrvars.hcl
+#
+# Values for *_resource_group_name, *_storage_account_name, and
+# *_shared_image_gallery_name come from your `terraform output` for the
+# staging env after the first apply.
+#
+# Run with:
+#   packer build -var-file=staging.pkrvars.hcl .
+# ============================================================================
+
+subscription_id            = "00000000-0000-0000-0000-000000000000"
+location                   = "germanywestcentral"
+
+# Build VM lives in a throwaway RG — Packer creates and destroys it per build
+build_resource_group_name  = "rg-packer-builds"
+
+# The env's resource group (created by Terraform)
+target_resource_group_name = "rg-helloapp-staging"
+
+# Copy these from `terraform -chdir=infra/envs/staging output`
+shared_image_gallery_name  = "sig_helloapp_staging"
+shared_image_name          = "nginx-react"
+storage_account_name       = "sthelloappstagingxxxxxx"
+
+# Build inputs
+artifacts_container_name   = "artifacts"
+artifacts_blob_prefix      = "latest/"
+image_version              = "1.0.0"
+
+# Single-region replication for staging
+replication_regions        = ["germanywestcentral"]
+
+# Build VM size — bigger = faster build, but transient
+vm_size                    = "Standard_B2s"
